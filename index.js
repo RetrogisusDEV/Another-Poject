@@ -69,6 +69,24 @@ const convertToOpus = (inputFilePath, outputFilePath, bitrate, callback) => {
         .on('error', (err) => console.error(err));
 };
 
+const retrieveFile = (soulseek, chatId, result, filename, bitrate) => {
+    const downloadPath = `${__dirname}/download/${filename}`;
+    const opusPath = `${__dirname}/download/${filename.replace('.mp3', '.opus')}`;
+
+    sendMessage(chatId, `Iniciando descarga de "${filename}"...`);
+    soulseek.download({ file: result, path: downloadPath }, (err, data) => {
+        if (err) { handleErr(chatId, err); }
+        sendMessage(chatId, `Descarga de "${downloadPath}" completada! Convirtiendo a Opus...`);
+
+        convertToOpus(downloadPath, opusPath, bitrate, () => {
+            sendMessage(chatId, `¡Conversión a Opus completada! Enviando archivo...`);
+            bot.sendAudio(chatId, opusPath).catch(err => handleErr(chatId, err));
+            fs.unlinkSync(downloadPath);
+            sendMessage(chatId, `Archivo "${filename}" enviado con éxito!`);
+        });
+    });
+};
+
 const onSearch = async (soulseek, chatId, query) => {
     sendMessage(chatId, `Buscando: ${query}`);
     const req = query.toLowerCase().replace(' - ', ' ');
@@ -84,47 +102,34 @@ const onSearch = async (soulseek, chatId, query) => {
         const topResults = searchResults.slice(0, 5);
         const resultsString = _.map(topResults, (r, index) => `${index + 1}. ${formatResult(r)}`).join('\n');
         sendMessage(chatId, `Se encontraron ${searchResults.length} resultados (${rawResults.length} sin filtrar)\nTop 5 resultados:\n${resultsString}`);
+        sendMessage(chatId, 'Selecciona el número del resultado que deseas descargar (1-5):');
     });
 };
 
-const onSelectBitrate = (chatId, index) => {
-    if (!searchResults[index]) {
-        sendMessage(chatId, `Índice inválido: ${index}`);
-        return;
+bot.on('message', (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+
+    if (/^\d+$/.test(text) && searchResults.length > 0) {
+        const index = parseInt(text, 10) - 1;
+        if (index >= 0 && index < searchResults.length) {
+            const result = searchResults[index];
+            const filename = basename(result.file);
+
+            sendMessage(chatId, 'Selecciona el bitrate para la conversión a Opus:\n1. 128 kbps\n2. 192 kbps\n3. 256 kbps\n4. 320 kbps\n5. 368 kbps');
+            
+            bot.once('message', (msg) => {
+                const bitrateSelection = parseInt(msg.text.trim(), 10);
+                const bitrates = [128, 192, 256, 320, 368];
+                const selectedBitrate = bitrates[bitrateSelection - 1] || 320;
+
+                retrieveFile(slskClient, chatId, result, filename, selectedBitrate);
+            });
+        } else {
+            sendMessage(chatId, 'Índice no válido. Inténtalo de nuevo.');
+        }
     }
-
-    const bitrateOptions = [128, 192, 256, 320, 368];
-    let message = 'Selecciona el bitrate para la conversión a Opus:\n';
-    bitrateOptions.forEach((bitrate, i) => {
-        message += `${i + 1}. ${bitrate} kbps\n`;
-    });
-
-    bot.sendMessage(chatId, message).then(() => {
-        bot.once('message', (msg) => {
-            const bitrateIndex = parseInt(msg.text.trim(), 10) - 1;
-            if (bitrateIndex >= 0 && bitrateIndex < bitrateOptions.length) {
-                const bitrate = bitrateOptions[bitrateIndex];
-                const result = searchResults[index];
-                const filename = basename(result.file);
-                const downloadPath = `${__dirname}/download/${filename}`;
-                const opusPath = `${__dirname}/download/${filename.replace('.mp3', '.opus')}`;
-
-                soulseek.download({ file: result, path: downloadPath }, (err, data) => {
-                    if (err) { handleErr(chatId, err); }
-                    sendMessage(chatId, `Descarga de "${downloadPath}" completada! Convirtiendo a Opus...`);
-
-                    convertToOpus(downloadPath, opusPath, bitrate, () => {
-                        sendMessage(chatId, `Conversión a Opus completada a ${bitrate} kbps! Enviando archivo...`);
-                        bot.sendAudio(chatId, opusPath).catch(err => handleErr(chatId, err));
-                        fs.unlinkSync(downloadPath);
-                    });
-                });
-            } else {
-                sendMessage(chatId, 'Selección de bitrate inválida.');
-            }
-        });
-    });
-};
+});
 
 const main = async (soulseek) => {
     console.log("Starting...");
@@ -141,6 +146,7 @@ const main = async (soulseek) => {
             console.error(err);
             return;
         }
+        global.slskClient = client;
         await main(client);
     });
 })().catch(err => console.error(err));
