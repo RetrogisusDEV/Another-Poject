@@ -1,8 +1,7 @@
-﻿const _ = require('lodash');
+const _ = require('lodash');
 const slsk = require('slsk-client');
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
-const https = require('https');
 const ffmpeg = require('fluent-ffmpeg');
 
 const bot = new TelegramBot('8114534699:AAFrPVLQDRBmYfALnHL1lKzD4E-Q5mC_HT8', { polling: true });
@@ -61,39 +60,17 @@ const formatResult = (r) => {
     return `|${r.bitrate}| ${basename(r.file)} (${humanFilesize(r.size)}) [slots: ${r.slots}]`;
 };
 
-const convertToOpus = (inputFilePath, outputFilePath, callback) => {
+const convertToOpus = (inputFilePath, outputFilePath, bitrate, callback) => {
     ffmpeg(inputFilePath)
         .toFormat('opus')
-        .audioBitrate(320)
+        .audioBitrate(bitrate)
         .save(outputFilePath)
         .on('end', callback)
         .on('error', (err) => console.error(err));
 };
 
-const retrieveFile = (soulseek, chatId, result, filename) => {
-    const downloadPath = `${__dirname}/download/${filename}`;
-    const opusPath = `${__dirname}/download/${filename.replace('.mp3', '.opus')}`;
-
-    if (fs.existsSync(opusPath)) {
-        sendMessage(chatId, `File already exists. Sending "${opusPath}"...`);
-        bot.sendAudio(chatId, opusPath).catch(err => handleErr(chatId, err));
-        return;
-    }
-
-    soulseek.download({ file: result, path: downloadPath }, (err, data) => {
-        if (err) { handleErr(chatId, err); }
-        sendMessage(chatId, `Download of "${downloadPath}" completed! Converting to Opus...`);
-
-        convertToOpus(downloadPath, opusPath, () => {
-            sendMessage(chatId, `Conversion to Opus completed! Sending file...`);
-            bot.sendAudio(chatId, opusPath).catch(err => handleErr(chatId, err));
-            fs.unlinkSync(downloadPath);
-        });
-    });
-};
-
 const onSearch = async (soulseek, chatId, query) => {
-    sendMessage(chatId, `Searching: ${query}`);
+    sendMessage(chatId, `Buscando: ${query}`);
     const req = query.toLowerCase().replace(' - ', ' ');
     soulseek.search({ req, timeout: 20000 }, (err, rawResults) => {
         if (err) { handleErr(chatId, err); }
@@ -101,22 +78,52 @@ const onSearch = async (soulseek, chatId, query) => {
         searchResults = sorted.filter((r) => filterResult(r, query));
         if (searchResults.length === 0) {
             const resultsString = _.map(sorted, formatResult).join('\n');
-            sendMessage(chatId, `Found 0 results (${rawResults.length} unfiltered)\n\n${resultsString}`);
+            sendMessage(chatId, `No se encontraron resultados (${rawResults.length} sin filtrar)\n\n${resultsString}`);
             return;
         }
-        const bestResult = searchResults[searchResults.length - 1];
-        sendMessage(chatId, `Found ${searchResults.length} results (${rawResults.length} unfiltered)\nBest result: ${formatResult(bestResult)}`);
+        const topResults = searchResults.slice(0, 5);
+        const resultsString = _.map(topResults, (r, index) => `${index + 1}. ${formatResult(r)}`).join('\n');
+        sendMessage(chatId, `Se encontraron ${searchResults.length} resultados (${rawResults.length} sin filtrar)\nTop 5 resultados:\n${resultsString}`);
     });
 };
 
-const onDownload = (chatId, index) => {
+const onSelectBitrate = (chatId, index) => {
     if (!searchResults[index]) {
-        sendMessage(chatId, `Invalid index: ${index}`);
+        sendMessage(chatId, `Índice inválido: ${index}`);
         return;
     }
-    const result = searchResults[index];
-    const filename = basename(result.file);
-    retrieveFile(soulseek, chatId, result, filename);
+
+    const bitrateOptions = [128, 192, 256, 320, 368];
+    let message = 'Selecciona el bitrate para la conversión a Opus:\n';
+    bitrateOptions.forEach((bitrate, i) => {
+        message += `${i + 1}. ${bitrate} kbps\n`;
+    });
+
+    bot.sendMessage(chatId, message).then(() => {
+        bot.once('message', (msg) => {
+            const bitrateIndex = parseInt(msg.text.trim(), 10) - 1;
+            if (bitrateIndex >= 0 && bitrateIndex < bitrateOptions.length) {
+                const bitrate = bitrateOptions[bitrateIndex];
+                const result = searchResults[index];
+                const filename = basename(result.file);
+                const downloadPath = `${__dirname}/download/${filename}`;
+                const opusPath = `${__dirname}/download/${filename.replace('.mp3', '.opus')}`;
+
+                soulseek.download({ file: result, path: downloadPath }, (err, data) => {
+                    if (err) { handleErr(chatId, err); }
+                    sendMessage(chatId, `Descarga de "${downloadPath}" completada! Convirtiendo a Opus...`);
+
+                    convertToOpus(downloadPath, opusPath, bitrate, () => {
+                        sendMessage(chatId, `Conversión a Opus completada a ${bitrate} kbps! Enviando archivo...`);
+                        bot.sendAudio(chatId, opusPath).catch(err => handleErr(chatId, err));
+                        fs.unlinkSync(downloadPath);
+                    });
+                });
+            } else {
+                sendMessage(chatId, 'Selección de bitrate inválida.');
+            }
+        });
+    });
 };
 
 const main = async (soulseek) => {
@@ -125,12 +132,6 @@ const main = async (soulseek) => {
         const chatId = msg.chat.id;
         const query = match[1].trim();
         onSearch(soulseek, chatId, query);
-    });
-
-    bot.onText(/\/download (\d+)/, (msg, match) => {
-        const chatId = msg.chat.id;
-        const index = parseInt(match[1], 10);
-        onDownload(chatId, index);
     });
 };
 
